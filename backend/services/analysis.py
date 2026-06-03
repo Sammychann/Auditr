@@ -2,6 +2,10 @@ import pandas as pd
 from typing import List, Dict, Any
 import yfinance as yf
 import time
+import math
+from scipy import stats
+from sklearn.ensemble import IsolationForest
+from sklearn.preprocessing import StandardScaler
 
 # Cache to avoid spamming Yahoo Finance APIs
 _BENCHMARK_CACHE = {}
@@ -224,9 +228,73 @@ def calculate_ratios(metrics_by_year: Dict[str, Dict[str, float]]) -> List[Dict[
     return ratios
 
 
+def _check_benfords_law(metrics_by_year: Dict[str, Dict[str, float]]) -> Dict[str, Any]:
+    all_numbers = []
+    for year_data in metrics_by_year.values():
+        for val in year_data.values():
+            if val != 0 and not pd.isna(val):
+                all_numbers.append(abs(val))
+    
+    if len(all_numbers) < 15: # Need some minimal sample
+        return None
+        
+    first_digits = []
+    for num in all_numbers:
+        digit_str = str(num).replace('.', '').replace('-', '').lstrip('0')
+        if digit_str:
+            first_digits.append(int(digit_str[0]))
+            
+    observed_counts = [first_digits.count(d) for d in range(1, 10)]
+    expected_probs = [math.log10(1 + 1/d) for d in range(1, 10)]
+    expected_counts = [p * len(first_digits) for p in expected_probs]
+    expected_counts = [max(e, 1e-9) for e in expected_counts]
+    
+    try:
+        chi2_stat, p_val = stats.chisquare(f_obs=observed_counts, f_exp=expected_counts)
+        if p_val < 0.01: # Strict threshold for critical fraud flag
+            return {
+                "description": f"Benford's Law violation detected (p-value: {p_val:.4f}). The distribution of leading digits deviates significantly from natural expectations, suggesting potential artificial manipulation.",
+                "severity": "Critical",
+                "related_metrics": ["All Numerical Data"]
+            }
+    except Exception as e:
+        print(f"[ML] Benford test failed: {e}")
+        
+    return None
+
+def _run_isolation_forest(metrics_by_year: Dict[str, Dict[str, float]]) -> List[Dict[str, Any]]:
+    df = pd.DataFrame.from_dict(metrics_by_year, orient='index')
+    if len(df) < 3:
+        return [] 
+        
+    # Impute missing values with column mean, then 0
+    df_imputed = df.fillna(df.mean(numeric_only=True)).fillna(0)
+    
+    try:
+        scaler = StandardScaler()
+        scaled_data = scaler.fit_transform(df_imputed)
+        
+        # Isolate exactly the most distinct year if it's statistically distant
+        model = IsolationForest(contamination=0.25, random_state=42)
+        preds = model.fit_predict(scaled_data)
+        
+        anomalies = []
+        for i, pred in enumerate(preds):
+            if pred == -1:
+                outlier_year = df.index[i]
+                anomalies.append({
+                    "description": f"Machine Learning (Isolation Forest) identified fiscal year {outlier_year} as a highly anomalous structural outlier compared to historical baselines.",
+                    "severity": "High",
+                    "related_metrics": ["Multi-dimensional structural deviation"]
+                })
+        return anomalies
+    except Exception as e:
+        print(f"[ML] Isolation forest failed: {e}")
+        return []
+
 def detect_anomalies(metrics_by_year: Dict[str, Dict[str, float]]) -> List[Dict[str, Any]]:
     """
-    Detects basic rule-based anomalies (e.g., Revenue up 40% but Cash Flow down).
+    Detects anomalies using both rule-based heuristics and Unsupervised Machine Learning.
     """
     anomalies = []
 
@@ -286,5 +354,15 @@ def detect_anomalies(metrics_by_year: Dict[str, Dict[str, float]]) -> List[Dict[
                         "severity": "High",
                         "related_metrics": [metric]
                     })
+
+    # --- Machine Learning Overlay ---
+    # 1. Benford's Law
+    benford_anomaly = _check_benfords_law(metrics_by_year)
+    if benford_anomaly:
+        anomalies.append(benford_anomaly)
+        
+    # 2. Isolation Forest
+    if_anomalies = _run_isolation_forest(metrics_by_year)
+    anomalies.extend(if_anomalies)
 
     return anomalies
