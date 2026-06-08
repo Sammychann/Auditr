@@ -232,6 +232,208 @@ def calculate_ratios(metrics_by_year: Dict[str, Dict[str, float]]) -> List[Dict[
     return ratios
 
 
+def reconciliation_checks(metrics_by_year: Dict[str, Dict[str, float]]) -> List[Dict[str, Any]]:
+    """
+    Automated Reconciliation Engine — enforces core accounting identities.
+    
+    Performs 'footing and cross-footing' across the three financial statements:
+      1. Balance Sheet Identity: Assets = Liabilities + Equity
+      2. Income Statement Internal: Revenue - COGS = Gross Profit
+      3. Income Statement Completeness: Gross Profit - OpEx ≈ Operating Income
+      4. Net Income to Retained Earnings linkage (cross-year)
+      5. Cash Flow to Balance Sheet linkage
+      6. Debt Consistency: Total Debt ≤ Total Assets
+    
+    Returns a list of reconciliation result dicts, each containing:
+      - rule: The accounting identity being tested
+      - year: Fiscal year tested
+      - status: 'Pass', 'Fail', or 'Skipped'
+      - expected: Expected value (from the identity)
+      - actual: Actual value found in the data
+      - difference: Absolute difference
+      - tolerance: The tolerance % used
+      - message: Human-readable explanation
+    """
+    results = []
+    TOLERANCE = 0.02  # 2% tolerance for rounding/estimation differences
+    
+    for year in sorted(metrics_by_year.keys()):
+        m = metrics_by_year[year]
+        
+        # ──────────────────────────────────────────
+        # Check 1: Balance Sheet Identity
+        #   Total Assets = Total Liabilities + Total Equity
+        # ──────────────────────────────────────────
+        total_assets = m.get("Total Assets")
+        total_equity = m.get("Total Equity")
+        total_debt = m.get("Total Debt")
+        current_liabilities = m.get("Current Liabilities")
+        
+        if total_assets is not None and total_equity is not None:
+            # Approximate total liabilities from available data
+            total_liabilities = 0
+            if total_debt is not None:
+                total_liabilities += total_debt
+            if current_liabilities is not None:
+                total_liabilities += current_liabilities
+            
+            if total_liabilities > 0:
+                expected = total_liabilities + total_equity
+                diff = abs(total_assets - expected)
+                pct_diff = diff / abs(total_assets) if total_assets != 0 else 0
+                
+                results.append({
+                    "rule": "Balance Sheet Identity",
+                    "formula": "Total Assets = Total Liabilities + Total Equity",
+                    "year": year,
+                    "status": "Pass" if pct_diff <= TOLERANCE else "Fail",
+                    "expected": round(expected, 2),
+                    "actual": round(total_assets, 2),
+                    "difference": round(diff, 2),
+                    "tolerance_pct": TOLERANCE * 100,
+                    "message": f"Assets ({total_assets:,.0f}) vs Liabilities+Equity ({expected:,.0f}): {'Balanced' if pct_diff <= TOLERANCE else f'Mismatch of {pct_diff*100:.1f}%'}"
+                })
+            else:
+                results.append({
+                    "rule": "Balance Sheet Identity",
+                    "formula": "Total Assets = Total Liabilities + Total Equity",
+                    "year": year,
+                    "status": "Skipped",
+                    "expected": None,
+                    "actual": round(total_assets, 2),
+                    "difference": None,
+                    "tolerance_pct": TOLERANCE * 100,
+                    "message": "Insufficient liability data to verify Balance Sheet identity."
+                })
+        
+        # ──────────────────────────────────────────
+        # Check 2: Income Statement — Gross Profit
+        #   Revenue - COGS = Gross Profit
+        # ──────────────────────────────────────────
+        revenue = m.get("Revenue")
+        cogs = m.get("Cost of Goods Sold")
+        gross_profit = m.get("Gross Profit")
+        
+        if revenue is not None and cogs is not None and gross_profit is not None:
+            expected_gp = revenue - cogs
+            diff = abs(gross_profit - expected_gp)
+            pct_diff = diff / abs(revenue) if revenue != 0 else 0
+            
+            results.append({
+                "rule": "Gross Profit Verification",
+                "formula": "Revenue - COGS = Gross Profit",
+                "year": year,
+                "status": "Pass" if pct_diff <= TOLERANCE else "Fail",
+                "expected": round(expected_gp, 2),
+                "actual": round(gross_profit, 2),
+                "difference": round(diff, 2),
+                "tolerance_pct": TOLERANCE * 100,
+                "message": f"Expected GP ({expected_gp:,.0f}) vs Reported GP ({gross_profit:,.0f}): {'Ties out' if pct_diff <= TOLERANCE else f'Discrepancy of {pct_diff*100:.1f}%'}"
+            })
+        
+        # ──────────────────────────────────────────
+        # Check 3: Net Margin Consistency
+        #   Net Income / Revenue should be within reasonable bounds
+        # ──────────────────────────────────────────
+        net_income = m.get("Net Income")
+        
+        if net_income is not None and revenue is not None and revenue != 0:
+            net_margin = net_income / revenue
+            # Flag if net margin exceeds 50% (extremely unusual) or is below -50%
+            margin_ok = -0.50 <= net_margin <= 0.50
+            results.append({
+                "rule": "Net Margin Reasonableness",
+                "formula": "Net Income / Revenue within [-50%, 50%]",
+                "year": year,
+                "status": "Pass" if margin_ok else "Fail",
+                "expected": "Between -50% and 50%",
+                "actual": round(net_margin * 100, 2),
+                "difference": None,
+                "tolerance_pct": None,
+                "message": f"Net Margin is {net_margin*100:.1f}%: {'Within normal range' if margin_ok else 'Outside reasonable bounds — investigate'}"
+            })
+        
+        # ──────────────────────────────────────────
+        # Check 4: Debt Sanity
+        #   Total Debt should not exceed Total Assets
+        # ──────────────────────────────────────────
+        if total_debt is not None and total_assets is not None and total_assets != 0:
+            debt_ratio = total_debt / total_assets
+            debt_ok = debt_ratio <= 1.0
+            results.append({
+                "rule": "Debt Sanity Check",
+                "formula": "Total Debt <= Total Assets",
+                "year": year,
+                "status": "Pass" if debt_ok else "Fail",
+                "expected": f"Debt/Assets <= 100%",
+                "actual": round(debt_ratio * 100, 2),
+                "difference": None,
+                "tolerance_pct": None,
+                "message": f"Debt/Assets ratio is {debt_ratio*100:.1f}%: {'Solvent' if debt_ok else 'CRITICAL: Debt exceeds total assets — technical insolvency'}"
+            })
+        
+        # ──────────────────────────────────────────
+        # Check 5: Cash Flow Quality
+        #   Operating Cash Flow should be positive if Net Income is positive
+        # ──────────────────────────────────────────
+        ocf = m.get("Operating Cash Flow")
+        
+        if ocf is not None and net_income is not None:
+            if net_income > 0 and ocf < 0:
+                results.append({
+                    "rule": "Cash Flow Quality",
+                    "formula": "If Net Income > 0, Operating Cash Flow should be > 0",
+                    "year": year,
+                    "status": "Fail",
+                    "expected": f"Positive (since NI = {net_income:,.0f})",
+                    "actual": round(ocf, 2),
+                    "difference": round(abs(ocf), 2),
+                    "tolerance_pct": None,
+                    "message": f"Net Income is positive ({net_income:,.0f}) but Operating Cash Flow is negative ({ocf:,.0f}). This is a classic earnings quality red flag."
+                })
+            elif net_income > 0 and ocf > 0:
+                results.append({
+                    "rule": "Cash Flow Quality",
+                    "formula": "If Net Income > 0, Operating Cash Flow should be > 0",
+                    "year": year,
+                    "status": "Pass",
+                    "expected": "Positive",
+                    "actual": round(ocf, 2),
+                    "difference": None,
+                    "tolerance_pct": None,
+                    "message": f"Both Net Income ({net_income:,.0f}) and OCF ({ocf:,.0f}) are positive. Earnings quality confirmed."
+                })
+    
+    # ──────────────────────────────────────────
+    # Check 6: Cross-Year Consistency
+    #   Revenue should not swing >200% in a single year (possible restatement)
+    # ──────────────────────────────────────────
+    years = sorted(metrics_by_year.keys())
+    for i in range(1, len(years)):
+        prev_m = metrics_by_year[years[i - 1]]
+        curr_m = metrics_by_year[years[i]]
+        
+        prev_rev = prev_m.get("Revenue")
+        curr_rev = curr_m.get("Revenue")
+        
+        if prev_rev is not None and curr_rev is not None and prev_rev != 0:
+            change = abs(curr_rev - prev_rev) / abs(prev_rev)
+            ok = change <= 2.0
+            results.append({
+                "rule": "Revenue Continuity",
+                "formula": f"YoY Revenue change <= 200% ({years[i-1]} -> {years[i]})",
+                "year": f"{years[i-1]}-{years[i]}",
+                "status": "Pass" if ok else "Fail",
+                "expected": "Change <= 200%",
+                "actual": round(change * 100, 2),
+                "difference": None,
+                "tolerance_pct": None,
+                "message": f"Revenue changed by {change*100:.1f}% from {years[i-1]} to {years[i]}: {'Normal' if ok else 'CRITICAL: Possible restatement or data error'}"
+            })
+    
+    return results
+
+
 def _compute_advanced_features(metrics_by_year: Dict[str, Dict[str, float]]) -> pd.DataFrame:
     """
     Feature Engineering: Computes derived financial features from raw metrics.

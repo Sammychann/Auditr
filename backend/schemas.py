@@ -69,6 +69,9 @@ class FinancialRecordResponse(BaseModel):
     raw_parsed_data: Optional[Dict[str, Any]] = None
     industry_benchmarks: Optional[Dict[str, Any]] = None
     compliance_flags: Optional[List[str]] = []
+    
+    # V3: Reconciliation Engine
+    reconciliation_results: Optional[List[Dict[str, Any]]] = []
 
     class Config:
         from_attributes = True

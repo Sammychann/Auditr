@@ -21,3 +21,6 @@ class FinancialRecord(Base):
     raw_parsed_data = Column(JSON, nullable=True)  # Store raw DF dict for chat
     industry_benchmarks = Column(JSON, nullable=True) # Benchmark dict
     compliance_flags = Column(JSON, nullable=True) # List of compliance violation strings
+    
+    # V3: Reconciliation Engine
+    reconciliation_results = Column(JSON, nullable=True) # List of reconciliation check dicts

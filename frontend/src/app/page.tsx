@@ -30,6 +30,18 @@ interface AnomalyResult {
   related_metrics: string[];
 }
 
+interface ReconciliationResult {
+  rule: string;
+  formula: string;
+  year: string;
+  status: 'Pass' | 'Fail' | 'Skipped';
+  expected: any;
+  actual: any;
+  difference: number | null;
+  tolerance_pct: number | null;
+  message: string;
+}
+
 interface AnalysisResult {
   id?: number;
   filename?: string;
@@ -40,6 +52,7 @@ interface AnalysisResult {
   raw_data_summary: { years_analyzed: string[] };
   industry_benchmarks?: Record<string, number>;
   compliance_flags?: string[];
+  reconciliation_results?: ReconciliationResult[];
 }
 
 interface HistoryItem {
@@ -565,6 +578,62 @@ export default function Home() {
                           </li>
                         ))}
                       </ul>
+                    )}
+                  </div>
+
+                  {/* Reconciliation Engine Panel */}
+                  <div className="bg-white dark:bg-[#1a1a1a] rounded-3xl p-6 shadow-xl dark:shadow-2xl border border-slate-100 dark:border-white/5">
+                    <div className="flex items-center gap-3 mb-4">
+                      <div className="p-2 bg-indigo-50 dark:bg-indigo-500/10 rounded-xl">
+                        <ShieldCheck className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
+                      </div>
+                      <h3 className="text-lg font-bold text-slate-900 dark:text-white">Automated Reconciliation Engine</h3>
+                      {result.reconciliation_results && result.reconciliation_results.length > 0 && (
+                        <div className="ml-auto flex gap-2">
+                          <span className="text-xs font-bold px-2.5 py-1 rounded-full bg-emerald-100 dark:bg-emerald-500/15 text-emerald-700 dark:text-emerald-400">
+                            {result.reconciliation_results.filter(r => r.status === 'Pass').length} Passed
+                          </span>
+                          <span className="text-xs font-bold px-2.5 py-1 rounded-full bg-red-100 dark:bg-red-500/15 text-red-700 dark:text-red-400">
+                            {result.reconciliation_results.filter(r => r.status === 'Fail').length} Failed
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                    {(!result.reconciliation_results || result.reconciliation_results.length === 0) ? (
+                      <div className="p-4 bg-slate-50 dark:bg-white/5 text-slate-500 dark:text-slate-400 rounded-xl font-medium text-sm">
+                        No reconciliation checks available for this dataset.
+                      </div>
+                    ) : (
+                      <div className="space-y-2 max-h-[400px] overflow-y-auto pr-1">
+                        {result.reconciliation_results.map((check, idx) => (
+                          <div
+                            key={idx}
+                            className={`flex items-start gap-3 p-3 rounded-xl text-sm font-medium ${
+                              check.status === 'Pass'
+                                ? 'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-800 dark:text-emerald-300'
+                                : check.status === 'Fail'
+                                ? 'bg-red-50 dark:bg-red-500/10 text-red-800 dark:text-red-300'
+                                : 'bg-slate-50 dark:bg-white/5 text-slate-600 dark:text-slate-400'
+                            }`}
+                          >
+                            {check.status === 'Pass' ? (
+                              <CheckCircle className="w-5 h-5 flex-shrink-0 mt-0.5 text-emerald-500" />
+                            ) : check.status === 'Fail' ? (
+                              <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5 text-red-500" />
+                            ) : (
+                              <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5 text-slate-400" />
+                            )}
+                            <div className="flex-1">
+                              <div className="flex items-center gap-2 mb-0.5">
+                                <span className="font-bold">{check.rule}</span>
+                                <span className="text-xs opacity-60">({check.year})</span>
+                              </div>
+                              <p className="text-xs opacity-80">{check.message}</p>
+                              <p className="text-[11px] opacity-50 mt-0.5 font-mono">{check.formula}</p>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
                     )}
                   </div>
 

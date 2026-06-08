@@ -6,7 +6,7 @@ from pydantic import BaseModel
 import models
 import schemas
 from services.parser import parse_financial_statement
-from services.analysis import extract_financial_metrics, calculate_ratios, detect_anomalies, get_industry_benchmarks
+from services.analysis import extract_financial_metrics, calculate_ratios, detect_anomalies, get_industry_benchmarks, reconciliation_checks
 from services.ai import generate_audit_questions, check_compliance, chat_with_financials
 from database import engine, Base, get_db
 
@@ -56,6 +56,7 @@ async def upload_file(
         # 2. Analysis & Rules
         ratios = calculate_ratios(all_metrics_by_year)
         anomalies = detect_anomalies(all_metrics_by_year)
+        reconciliation = reconciliation_checks(all_metrics_by_year)
         benchmarks = get_industry_benchmarks(industry)
 
         # 3. AI Layer
@@ -75,7 +76,8 @@ async def upload_file(
             raw_data_summary=raw_data_summary,
             raw_parsed_data=all_metrics_by_year,
             industry_benchmarks=benchmarks,
-            compliance_flags=compliance_flags
+            compliance_flags=compliance_flags,
+            reconciliation_results=reconciliation
         )
         db.add(record)
         db.commit()
