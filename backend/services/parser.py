@@ -40,8 +40,22 @@ def parse_financial_statement(file_contents: bytes, filename: str) -> Tuple[pd.D
             # Use Groq to extract structured CSV
             csv_text = extract_csv_from_pdf_text(raw_text)
             
-            # Load into Pandas
-            df = pd.read_csv(io.StringIO(csv_text))
+            # Load into Pandas robustly
+            lines = [line for line in csv_text.split('\n') if line.strip()]
+            if lines:
+                header = lines[0].split(',')
+                n_cols = len(header)
+                clean_lines = [lines[0]]
+                for line in lines[1:]:
+                    parts = line.split(',')
+                    if len(parts) > n_cols:
+                        clean_lines.append(','.join(parts[:n_cols]))
+                    elif len(parts) > 0:
+                        parts.extend([''] * (n_cols - len(parts)))
+                        clean_lines.append(','.join(parts))
+                df = pd.read_csv(io.StringIO('\n'.join(clean_lines)))
+            else:
+                df = pd.DataFrame()
             
         except Exception as e:
             raise ValueError(f"Failed to process PDF: {e}")
