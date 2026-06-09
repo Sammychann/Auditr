@@ -6,7 +6,10 @@ import time
 import math
 import os
 import joblib
+import torch
+import shap
 from scipy import stats
+from .lstm_model import LSTMAutoencoder, compute_temporal_features
 
 # Cache to avoid spamming Yahoo Finance APIs
 _BENCHMARK_CACHE = {}
@@ -609,6 +612,7 @@ def _check_benfords_law(metrics_by_year: Dict[str, Dict[str, float]]) -> Optiona
 def _run_ensemble_detection(metrics_by_year: Dict[str, Dict[str, float]]) -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
     """
     Ensemble Anomaly Detection using pre-trained population-level models.
+    Incorporates SHAP (SHapley Additive exPlanations) for explainability.
     """
     try:
         models_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "models")
@@ -629,10 +633,6 @@ def _run_ensemble_detection(metrics_by_year: Dict[str, Dict[str, float]]) -> Tup
         lof_score_raw = -lof_model.decision_function(X_scaled)[0]
         svm_score_raw = -svm_model.decision_function(X_scaled)[0]
         
-        if_score_norm = (if_score_raw - model_stats['if_min']) / (model_stats['if_max'] - model_stats['if_min'] + 1e-9)
-        lof_score_norm = (lof_score_raw - model_stats['lof_min']) / (model_stats['lof_max'] - model_stats['lof_min'] + 1e-9)
-        svm_score_norm = (svm_score_raw - model_stats['svm_min']) / (model_stats['svm_max'] - model_stats['svm_min'] + 1e-9)
-        
         if_vote = 1 if if_score_raw > model_stats['if_threshold'] else 0
         lof_vote = 1 if lof_score_raw > model_stats['lof_threshold'] else 0
         svm_vote = 1 if svm_score_raw > model_stats['svm_threshold'] else 0
@@ -646,8 +646,26 @@ def _run_ensemble_detection(metrics_by_year: Dict[str, Dict[str, float]]) -> Tup
             if lof_vote: voters.append("Local Outlier Factor")
             if svm_vote: voters.append("One-Class SVM")
             
+            # --- SHAP Explainability ---
+            try:
+                # We use IsolationForest for the SHAP explanation since it's tree-based
+                explainer = shap.TreeExplainer(if_model)
+                shap_values = explainer.shap_values(X_scaled)
+                
+                # Get top 3 features contributing to the anomaly
+                feature_names = list(feature_dict.keys())
+                shap_importance = np.abs(shap_values[0])
+                top_indices = np.argsort(shap_importance)[-3:][::-1]
+                
+                shap_explanation = " Key driving features: " + ", ".join(
+                    [f"{feature_names[i]} (SHAP impact: {shap_values[0][i]:.2f})" for i in top_indices]
+                )
+            except Exception as e:
+                print(f"[ML] SHAP explanation failed: {e}")
+                shap_explanation = ""
+            
             anomalies.append({
-                "description": f"Ensemble ML Detection: Company flagged as anomalous by {total_votes}/3 population-trained models ({', '.join(voters)}). This indicates significant deviation from standard industry financial profiles.",
+                "description": f"Ensemble ML Detection: Company flagged as anomalous by {total_votes}/3 population-trained models ({', '.join(voters)}). This indicates significant deviation from standard industry financial profiles.{shap_explanation}",
                 "severity": "High",
                 "related_metrics": ["Multi-dimensional structural deviation"]
             })
@@ -660,35 +678,50 @@ def _run_ensemble_detection(metrics_by_year: Dict[str, Dict[str, float]]) -> Tup
 
 def _run_autoencoder(metrics_by_year: Dict[str, Dict[str, float]]) -> List[Dict[str, Any]]:
     """
-    Autoencoder-based Anomaly Detection using pre-trained model.
+    Autoencoder-based Anomaly Detection using pre-trained PyTorch LSTM sequence model.
     """
     try:
         models_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "models")
-        if not os.path.exists(os.path.join(models_dir, "ae_scaler.joblib")):
+        if not os.path.exists(os.path.join(models_dir, "lstm_autoencoder.pth")):
             return []
             
         ae_scaler = joblib.load(os.path.join(models_dir, "ae_scaler.joblib"))
-        autoencoder = joblib.load(os.path.join(models_dir, "autoencoder.joblib"))
         model_stats = joblib.load(os.path.join(models_dir, "model_stats.joblib"))
         
-        feature_dict = compute_company_feature_vector(metrics_by_year)
-        df = pd.DataFrame([feature_dict]).fillna(0)
-        X_scaled = ae_scaler.transform(df)
+        # Get temporal sequence features: shape (num_years, num_features)
+        temporal_seq = compute_temporal_features(metrics_by_year)
+        seq_len, num_features = temporal_seq.shape
         
-        reconstructed = autoencoder.predict(X_scaled)
-        error = np.mean((X_scaled - reconstructed) ** 2)
+        if seq_len < 2:
+            return []
+            
+        # Scale each timestep
+        temporal_scaled = ae_scaler.transform(temporal_seq)
+        
+        # Reshape for PyTorch model: (batch_size=1, seq_len, num_features)
+        X_tensor = torch.FloatTensor(temporal_scaled).unsqueeze(0)
+        
+        # Load Model
+        autoencoder = LSTMAutoencoder(input_dim=num_features, hidden_dim=8, num_layers=1)
+        autoencoder.load_state_dict(torch.load(os.path.join(models_dir, "lstm_autoencoder.pth"), weights_only=True))
+        autoencoder.eval()
+        
+        with torch.no_grad():
+            reconstructed = autoencoder(X_tensor)
+            # Calculate MSE reconstruction error
+            error = torch.mean((X_tensor - reconstructed) ** 2).item()
         
         anomalies = []
         if error > model_stats['ae_threshold']:
             anomalies.append({
-                "description": f"Autoencoder Deep Learning Check: Company reconstruction error ({error:.4f}) exceeded the population threshold ({model_stats['ae_threshold']:.4f}). The 5-year financial trajectory cannot be reconstructed from 'normal' company patterns.",
+                "description": f"PyTorch LSTM Autoencoder Check: Company's temporal reconstruction error ({error:.4f}) exceeded the population threshold ({model_stats['ae_threshold']:.4f}). The chronological sequence of financial metrics cannot be reconstructed from 'normal' company patterns.",
                 "severity": "High",
-                "related_metrics": ["Deep Learning structural deviation"]
+                "related_metrics": ["Temporal Deep Learning structural deviation"]
             })
             
         return anomalies
     except Exception as e:
-        print(f"[ML] Autoencoder failed: {e}")
+        print(f"[ML] LSTM Autoencoder failed: {e}")
         return []
 
 

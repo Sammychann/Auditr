@@ -72,6 +72,7 @@ class FinancialRecordResponse(BaseModel):
     
     # V3: Reconciliation Engine
     reconciliation_results: Optional[List[Dict[str, Any]]] = []
+    nlp_analysis: Optional[Dict[str, Any]] = None
 
     class Config:
         from_attributes = True

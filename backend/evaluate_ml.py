@@ -12,13 +12,16 @@ from sklearn.metrics import confusion_matrix, roc_curve, auc, classification_rep
 from sklearn.ensemble import IsolationForest
 from sklearn.neighbors import LocalOutlierFactor
 from sklearn.svm import OneClassSVM
-from sklearn.neural_network import MLPRegressor
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
+import torch
+import torch.nn as nn
+import torch.optim as optim
 
 warnings.filterwarnings('ignore')
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from services.analysis import _check_benfords_law, _check_temporal_trajectory
+from services.lstm_model import LSTMAutoencoder, compute_temporal_features
 
 # ─────────────────────────────────────────────────
 #  Feature Engineering: Company-Level Summary
@@ -272,25 +275,47 @@ def evaluate_ml():
     svm_scores = -svm_model.decision_function(X_all_scaled)
     svm_scores = (svm_scores - svm_scores.min()) / (svm_scores.max() - svm_scores.min() + 1e-9)
     
-    print("Training Autoencoder...")
+    print("Training PyTorch LSTM Autoencoder...")
     ae_scaler = MinMaxScaler()
-    X_train_ae = ae_scaler.fit_transform(X_train)
-    X_all_ae = ae_scaler.transform(X_all)
     
-    n_features = X_train_ae.shape[1]
-    hidden = max(3, n_features // 4)
-    autoencoder = MLPRegressor(
-        hidden_layer_sizes=(hidden,),
-        activation='relu',
-        max_iter=1000,
-        random_state=42,
-        tol=1e-6,
-        early_stopping=True,
-        validation_fraction=0.1
-    )
-    autoencoder.fit(X_train_ae, X_train_ae)
-    reconstructed = autoencoder.predict(X_all_ae)
-    ae_errors = np.mean((X_all_ae - reconstructed) ** 2, axis=1)
+    # Compute temporal features: shape (num_companies, 5_years, 15_features)
+    print("Computing temporal sequence features...")
+    temporal_features = [compute_temporal_features(c) for c in all_companies]
+    temporal_array = np.array(temporal_features) # shape: (1200, 5, 15)
+    num_companies, seq_len, num_features = temporal_array.shape
+    
+    # Flatten to scale, then reshape
+    temporal_flat = temporal_array.reshape(-1, num_features)
+    X_train_flat = temporal_flat[:1000 * seq_len] # First 1000 companies for training
+    ae_scaler.fit(X_train_flat)
+    
+    temporal_scaled_flat = ae_scaler.transform(temporal_flat)
+    temporal_scaled = temporal_scaled_flat.reshape(num_companies, seq_len, num_features)
+    
+    X_train_seq = torch.FloatTensor(temporal_scaled[:1000])
+    X_all_seq = torch.FloatTensor(temporal_scaled)
+    
+    autoencoder = LSTMAutoencoder(input_dim=num_features, hidden_dim=8, num_layers=1)
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(autoencoder.parameters(), lr=0.01)
+    
+    # Training Loop
+    autoencoder.train()
+    epochs = 100
+    for epoch in range(epochs):
+        optimizer.zero_grad()
+        output = autoencoder(X_train_seq)
+        loss = criterion(output, X_train_seq)
+        loss.backward()
+        optimizer.step()
+        
+    # Inference
+    autoencoder.eval()
+    with torch.no_grad():
+        reconstructed = autoencoder(X_all_seq)
+        # Calculate MSE per company (average over sequence and features)
+        ae_errors = torch.mean((X_all_seq - reconstructed) ** 2, dim=(1, 2)).numpy()
+        
     ae_scores = (ae_errors - ae_errors.min()) / (ae_errors.max() - ae_errors.min() + 1e-9)
     
     # ─────────────────────────────────────────────
@@ -305,7 +330,7 @@ def evaluate_ml():
     joblib.dump(lof_model, os.path.join(models_dir, "lof_model.joblib"))
     joblib.dump(svm_model, os.path.join(models_dir, "svm_model.joblib"))
     joblib.dump(ae_scaler, os.path.join(models_dir, "ae_scaler.joblib"))
-    joblib.dump(autoencoder, os.path.join(models_dir, "autoencoder.joblib"))
+    torch.save(autoencoder.state_dict(), os.path.join(models_dir, "lstm_autoencoder.pth"))
     
     # Also save thresholds and training stats needed for scoring
     if_threshold = np.percentile(if_scores[:1000], 95)

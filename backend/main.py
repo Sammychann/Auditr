@@ -8,6 +8,7 @@ import schemas
 from services.parser import parse_financial_statement
 from services.analysis import extract_financial_metrics, calculate_ratios, detect_anomalies, get_industry_benchmarks, reconciliation_checks
 from services.ai import generate_audit_questions, check_compliance, chat_with_financials
+from services.nlp_analysis import analyze_mda_text
 from database import engine, Base, get_db
 
 Base.metadata.create_all(bind=engine)
@@ -44,7 +45,7 @@ async def upload_file(
                 raise HTTPException(status_code=400, detail=f"Invalid file type for {file.filename}")
             filenames.append(file.filename)
             contents = await file.read()
-            df = parse_financial_statement(contents, file.filename)
+            df, raw_text = parse_financial_statement(contents, file.filename)
             file_metrics = extract_financial_metrics(df)
             
             # Merge metrics
@@ -62,6 +63,7 @@ async def upload_file(
         # 3. AI Layer
         audit_questions = generate_audit_questions(anomalies, ratios)
         compliance_flags = check_compliance(all_metrics_by_year)
+        nlp_analysis_result = analyze_mda_text(raw_text) if 'raw_text' in locals() else None
 
         raw_data_summary = {"years_analyzed": list(all_metrics_by_year.keys())}
         combined_filename = ", ".join(filenames)
@@ -77,7 +79,8 @@ async def upload_file(
             raw_parsed_data=all_metrics_by_year,
             industry_benchmarks=benchmarks,
             compliance_flags=compliance_flags,
-            reconciliation_results=reconciliation
+            reconciliation_results=reconciliation,
+            nlp_analysis=nlp_analysis_result
         )
         db.add(record)
         db.commit()

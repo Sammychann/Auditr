@@ -3,11 +3,14 @@ import io
 import fitz  # PyMuPDF
 from services.ai import extract_csv_from_pdf_text
 
-def parse_financial_statement(file_contents: bytes, filename: str) -> pd.DataFrame:
+from typing import Tuple
+
+def parse_financial_statement(file_contents: bytes, filename: str) -> Tuple[pd.DataFrame, str]:
     """
-    Parses an uploaded Excel or CSV file into a pandas DataFrame.
-    Returns a cleaned DataFrame.
+    Parses an uploaded Excel, CSV, or PDF file into a pandas DataFrame.
+    Also returns the raw extracted text (useful for NLP analysis of PDFs).
     """
+    raw_text = ""
     if filename.endswith(".csv"):
         # Try different encodings, as files can come from Excel (UTF-8 BOM), PowerShell (UTF-16), etc.
         encodings = ['utf-8-sig', 'utf-16', 'utf-8', 'cp1252']
@@ -31,7 +34,6 @@ def parse_financial_statement(file_contents: bytes, filename: str) -> pd.DataFra
         # Extract text from PDF
         try:
             doc = fitz.open(stream=file_contents, filetype="pdf")
-            raw_text = ""
             for page in doc:
                 raw_text += page.get_text() + "\n\n"
             
@@ -50,4 +52,4 @@ def parse_financial_statement(file_contents: bytes, filename: str) -> pd.DataFra
     df = df.dropna(how='all') # drop fully empty rows
     df = df.dropna(axis=1, how='all') # drop fully empty columns
     
-    return df
+    return df, raw_text

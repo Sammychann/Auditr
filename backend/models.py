@@ -23,4 +23,7 @@ class FinancialRecord(Base):
     compliance_flags = Column(JSON, nullable=True) # List of compliance violation strings
     
     # V3: Reconciliation Engine
-    reconciliation_results = Column(JSON, nullable=True) # List of reconciliation check dicts
+    reconciliation_results = Column(JSON, nullable=True) # Dict of identical mapping checks
+    
+    # V4: NLP MD&A Risk Scoring
+    nlp_analysis = Column(JSON, nullable=True) # Dict with risk_score, summary, flags dicts
