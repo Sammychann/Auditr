@@ -40,7 +40,7 @@ def create_csv(filename, data):
 
 def generate_normal_tech():
     data = generate_base_metrics(1000000)
-    create_csv("test_data/csv/01_normal_tech.csv", data)
+    create_csv("test_data/Normal/csv/01_normal_tech.csv", data)
 
 def generate_fraud_revenue_inflation():
     data = generate_base_metrics(2000000)
@@ -53,7 +53,7 @@ def generate_fraud_revenue_inflation():
     data[-1]["Net Income"] = int(data[-1]["Net Income"] * 4.0)
     data[-1]["Operating Cash Flow"] = int(data[-1]["Operating Cash Flow"] * 0.1)
     
-    create_csv("test_data/csv/02_fraud_revenue_inflation.csv", data)
+    create_csv("test_data/Fraud/csv/02_fraud_revenue_inflation.csv", data)
 
 def generate_fraud_debt_hiding():
     data = generate_base_metrics(5000000)
@@ -62,11 +62,11 @@ def generate_fraud_debt_hiding():
     data[-1]["Current Liabilities"] = int(data[-1]["Current Liabilities"] * 0.1)
     data[-1]["Total Equity"] = int(data[-1]["Total Equity"] * 3.0)
     
-    create_csv("test_data/csv/03_fraud_debt_hiding.csv", data)
+    create_csv("test_data/Fraud/csv/03_fraud_debt_hiding.csv", data)
 
 def generate_pdf_with_nlp_risk():
     """Generates a PDF with evasive MD&A text to trigger the LLM NLP Risk module."""
-    filename = "test_data/pdf/04_fraud_nlp_evasive_mda.pdf"
+    filename = "test_data/Fraud/pdf/04_fraud_nlp_evasive_mda.pdf"
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     
     doc = SimpleDocTemplate(filename, pagesize=letter)
@@ -122,7 +122,10 @@ def generate_pdf_with_nlp_risk():
 
 
 if __name__ == "__main__":
-    os.makedirs("test_data/csv", exist_ok=True)
+    os.makedirs("test_data/Normal/csv", exist_ok=True)
+    os.makedirs("test_data/Normal/pdf", exist_ok=True)
+    os.makedirs("test_data/Fraud/csv", exist_ok=True)
+    os.makedirs("test_data/Fraud/pdf", exist_ok=True)
     generate_normal_tech()
     generate_fraud_revenue_inflation()
     generate_fraud_debt_hiding()
