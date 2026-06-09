@@ -3,6 +3,7 @@ import sys
 import numpy as np
 import pandas as pd
 import warnings
+import joblib
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -292,6 +293,34 @@ def evaluate_ml():
     ae_errors = np.mean((X_all_ae - reconstructed) ** 2, axis=1)
     ae_scores = (ae_errors - ae_errors.min()) / (ae_errors.max() - ae_errors.min() + 1e-9)
     
+    # ─────────────────────────────────────────────
+    #  Save Pre-trained Models
+    # ─────────────────────────────────────────────
+    print("Saving pre-trained models to disk...")
+    models_dir = os.path.join(os.path.dirname(__file__), "models")
+    os.makedirs(models_dir, exist_ok=True)
+    
+    joblib.dump(scaler, os.path.join(models_dir, "scaler.joblib"))
+    joblib.dump(if_model, os.path.join(models_dir, "if_model.joblib"))
+    joblib.dump(lof_model, os.path.join(models_dir, "lof_model.joblib"))
+    joblib.dump(svm_model, os.path.join(models_dir, "svm_model.joblib"))
+    joblib.dump(ae_scaler, os.path.join(models_dir, "ae_scaler.joblib"))
+    joblib.dump(autoencoder, os.path.join(models_dir, "autoencoder.joblib"))
+    
+    # Also save thresholds and training stats needed for scoring
+    if_threshold = np.percentile(if_scores[:1000], 95)
+    lof_threshold = np.percentile(lof_scores[:1000], 95)
+    svm_threshold = np.percentile(svm_scores[:1000], 95)
+    ae_threshold = np.percentile(ae_scores[:1000], 95)
+    
+    stats = {
+        "if_min": if_scores.min(), "if_max": if_scores.max(), "if_threshold": if_threshold,
+        "lof_min": lof_scores.min(), "lof_max": lof_scores.max(), "lof_threshold": lof_threshold,
+        "svm_min": svm_scores.min(), "svm_max": svm_scores.max(), "svm_threshold": svm_threshold,
+        "ae_min": ae_errors.min(), "ae_max": ae_errors.max(), "ae_threshold": ae_threshold
+    }
+    joblib.dump(stats, os.path.join(models_dir, "model_stats.joblib"))
+
     # ─────────────────────────────────────────────
     #  Step 4: Weighted Ensemble Scoring
     # ─────────────────────────────────────────────

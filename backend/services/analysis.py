@@ -4,12 +4,9 @@ from typing import List, Dict, Any, Optional, Tuple
 import yfinance as yf
 import time
 import math
+import os
+import joblib
 from scipy import stats
-from sklearn.ensemble import IsolationForest
-from sklearn.neighbors import LocalOutlierFactor
-from sklearn.svm import OneClassSVM
-from sklearn.neural_network import MLPRegressor
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
 
 # Cache to avoid spamming Yahoo Finance APIs
 _BENCHMARK_CACHE = {}
@@ -434,61 +431,99 @@ def reconciliation_checks(metrics_by_year: Dict[str, Dict[str, float]]) -> List[
     return results
 
 
-def _compute_advanced_features(metrics_by_year: Dict[str, Dict[str, float]]) -> pd.DataFrame:
+def compute_company_feature_vector(metrics_by_year: Dict[str, Dict[str, float]]) -> Dict[str, float]:
     """
-    Feature Engineering: Computes derived financial features from raw metrics.
-    Returns a DataFrame with one row per year, containing:
-      - Raw metrics
-      - Financial ratios (Current Ratio, Debt-to-Equity, Net Margin, Gross Margin)
-      - Year-over-Year percentage changes
-      - Cross-metric consistency scores
+    Compresses a company's multi-year data into a SINGLE feature vector.
     """
     years = sorted(metrics_by_year.keys())
-    rows = []
+    features = {}
     
-    for i, year in enumerate(years):
+    key_metrics = ["Revenue", "Cost of Goods Sold", "Net Income",
+                   "Current Assets", "Current Liabilities", "Total Assets",
+                   "Total Debt", "Total Equity", "Operating Cash Flow",
+                   "Gross Profit", "Operating Expenses"]
+    
+    for metric in key_metrics:
+        vals = [metrics_by_year[y].get(metric, np.nan) for y in years]
+        vals = [v for v in vals if not np.isnan(v)]
+        if len(vals) >= 2:
+            features[f"{metric}_mean"] = float(np.mean(vals))
+            features[f"{metric}_std"] = float(np.std(vals))
+            features[f"{metric}_max_min_ratio"] = float(max(vals) / min(vals)) if min(vals) != 0 else 0.0
+            # YoY changes
+            yoy_changes = [(vals[i] - vals[i-1]) / abs(vals[i-1]) for i in range(1, len(vals)) if vals[i-1] != 0]
+            features[f"{metric}_max_yoy"] = float(max(yoy_changes)) if yoy_changes else 0.0
+            features[f"{metric}_min_yoy"] = float(min(yoy_changes)) if yoy_changes else 0.0
+            features[f"{metric}_yoy_volatility"] = float(np.std(yoy_changes)) if len(yoy_changes) > 1 else 0.0
+        else:
+            features[f"{metric}_mean"] = 0.0
+            features[f"{metric}_std"] = 0.0
+            features[f"{metric}_max_min_ratio"] = 0.0
+            features[f"{metric}_max_yoy"] = 0.0
+            features[f"{metric}_min_yoy"] = 0.0
+            features[f"{metric}_yoy_volatility"] = 0.0
+    
+    # --- Financial Ratios (averaged across years) ---
+    ratios = {"_CurrentRatio": [], "_DebtToEquity": [], "_NetMargin": [], "_GrossMargin": []}
+    for year in years:
         m = metrics_by_year[year]
-        row = dict(m)  # Start with raw metrics
-        
-        # --- Financial Ratios ---
         rev = m.get("Revenue", 0)
         cogs = m.get("Cost of Goods Sold", 0)
-        net_inc = m.get("Net Income", 0)
-        curr_a = m.get("Current Assets", 0)
-        curr_l = m.get("Current Liabilities", 0)
-        total_debt = m.get("Total Debt", 0)
-        total_eq = m.get("Total Equity", 0)
-        ocf = m.get("Operating Cash Flow", 0)
+        ni = m.get("Net Income", 0)
+        ca = m.get("Current Assets", 0)
+        cl = m.get("Current Liabilities", 0)
+        td = m.get("Total Debt", 0)
+        te = m.get("Total Equity", 0)
         
-        row["_CurrentRatio"] = curr_a / curr_l if curr_l != 0 else 0
-        row["_DebtToEquity"] = total_debt / total_eq if total_eq != 0 else 0
-        row["_NetMargin"] = (net_inc / rev * 100) if rev != 0 else 0
-        row["_GrossMargin"] = ((rev - cogs) / rev * 100) if rev != 0 else 0
-        
-        # --- Cross-Metric Consistency Scores ---
-        # Revenue vs Cash Flow divergence (Enron red flag)
-        row["_RevCashFlowDivergence"] = abs(rev - ocf) / rev if rev != 0 else 0
-        # Net Income vs Cash Flow divergence (earnings quality)
-        row["_IncCashFlowDivergence"] = abs(net_inc - ocf) / abs(net_inc) if net_inc != 0 else 0
-        
-        # --- Year-over-Year Changes ---
-        if i > 0:
-            prev_m = metrics_by_year[years[i - 1]]
-            for metric_name in ["Revenue", "Net Income", "Operating Cash Flow", "Total Debt", "Current Assets"]:
-                prev_val = prev_m.get(metric_name, 0)
-                curr_val = m.get(metric_name, 0)
-                if prev_val != 0:
-                    row[f"_YoY_{metric_name}"] = (curr_val - prev_val) / abs(prev_val)
-                else:
-                    row[f"_YoY_{metric_name}"] = 0
-        else:
-            for metric_name in ["Revenue", "Net Income", "Operating Cash Flow", "Total Debt", "Current Assets"]:
-                row[f"_YoY_{metric_name}"] = 0
-        
-        rows.append(row)
+        if cl != 0: ratios["_CurrentRatio"].append(ca / cl)
+        if te != 0: ratios["_DebtToEquity"].append(td / te)
+        if rev != 0: ratios["_NetMargin"].append(ni / rev)
+        if rev != 0: ratios["_GrossMargin"].append((rev - cogs) / rev)
     
-    df = pd.DataFrame(rows, index=years)
-    return df
+    for name, vals in ratios.items():
+        features[f"{name}_mean"] = float(np.mean(vals)) if vals else 0.0
+        features[f"{name}_std"] = float(np.std(vals)) if len(vals) > 1 else 0.0
+    
+    # --- Cross-metric Consistency ---
+    rev_vals = [metrics_by_year[y].get("Revenue", np.nan) for y in years]
+    ocf_vals = [metrics_by_year[y].get("Operating Cash Flow", np.nan) for y in years]
+    ni_vals = [metrics_by_year[y].get("Net Income", np.nan) for y in years]
+    
+    valid_pairs = [(r, o) for r, o in zip(rev_vals, ocf_vals) if not np.isnan(r) and not np.isnan(o)]
+    if len(valid_pairs) >= 3:
+        r_arr, o_arr = zip(*valid_pairs)
+        try:
+            corr, _ = stats.pearsonr(r_arr, o_arr)
+            features["_RevOCF_corr"] = float(corr)
+        except:
+            features["_RevOCF_corr"] = 0.0
+    else:
+        features["_RevOCF_corr"] = 0.0
+    
+    valid_ni_ocf = [(n, o) for n, o in zip(ni_vals, ocf_vals) if not np.isnan(n) and not np.isnan(o)]
+    if len(valid_ni_ocf) >= 3:
+        n_arr, o_arr = zip(*valid_ni_ocf)
+        try:
+            corr, _ = stats.pearsonr(n_arr, o_arr)
+            features["_NI_OCF_corr"] = float(corr)
+        except:
+            features["_NI_OCF_corr"] = 0.0
+    else:
+        features["_NI_OCF_corr"] = 0.0
+    
+    # Revenue slope vs OCF slope divergence
+    if len(rev_vals) >= 3 and len(ocf_vals) >= 3:
+        x = np.arange(len(years))
+        rev_clean = np.array([v if not np.isnan(v) else 0 for v in rev_vals])
+        ocf_clean = np.array([v if not np.isnan(v) else 0 for v in ocf_vals])
+        rev_slope = np.polyfit(x, rev_clean, 1)[0]
+        ocf_slope = np.polyfit(x, ocf_clean, 1)[0]
+        rev_mean = np.mean(rev_clean)
+        features["_slope_divergence"] = float((rev_slope - ocf_slope) / abs(rev_mean)) if rev_mean != 0 else 0.0
+    else:
+        features["_slope_divergence"] = 0.0
+    
+    return features
 
 
 def _check_benfords_law(metrics_by_year: Dict[str, Dict[str, float]]) -> Optional[Dict[str, Any]]:
@@ -573,77 +608,51 @@ def _check_benfords_law(metrics_by_year: Dict[str, Dict[str, float]]) -> Optiona
 
 def _run_ensemble_detection(metrics_by_year: Dict[str, Dict[str, float]]) -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
     """
-    Ensemble Anomaly Detection combining three unsupervised algorithms:
-      1. Isolation Forest (tree-based structural outliers)
-      2. Local Outlier Factor (density-based local anomalies)
-      3. One-Class SVM (boundary-based normal envelope)
-    
-    Returns (anomalies_list, scores_dict_by_year).
-    Each algorithm votes independently; a year is flagged only if ≥2 algorithms agree.
+    Ensemble Anomaly Detection using pre-trained population-level models.
     """
-    feature_df = _compute_advanced_features(metrics_by_year)
-    if len(feature_df) < 3:
-        return [], {}
-        
-    # Impute and scale
-    df_imputed = feature_df.fillna(feature_df.mean(numeric_only=True)).fillna(0)
-    
     try:
-        scaler = StandardScaler()
-        scaled_data = scaler.fit_transform(df_imputed)
-        
-        years = list(feature_df.index)
-        n_samples = len(years)
-        
-        # --- Model 1: Isolation Forest ---
-        if_model = IsolationForest(contamination='auto', random_state=42)
-        if_model.fit(scaled_data)
-        if_scores = if_model.decision_function(scaled_data)
-        if_votes = [1 if s < -0.1 else 0 for s in if_scores]
-        
-        # --- Model 2: Local Outlier Factor ---
-        n_neighbors = min(max(2, n_samples - 1), 20)
-        lof_model = LocalOutlierFactor(n_neighbors=n_neighbors, contamination='auto', novelty=False)
-        lof_preds = lof_model.fit_predict(scaled_data)
-        lof_scores = lof_model.negative_outlier_factor_
-        lof_votes = [1 if p == -1 else 0 for p in lof_preds]
-        
-        # --- Model 3: One-Class SVM ---
-        svm_model = OneClassSVM(kernel='rbf', gamma='auto', nu=0.15)
-        svm_preds = svm_model.fit_predict(scaled_data)
-        svm_scores = svm_model.decision_function(scaled_data)
-        svm_votes = [1 if p == -1 else 0 for p in svm_preds]
-        
-        # --- Ensemble Voting ---
-        anomalies = []
-        year_scores = {}
-        
-        for i, year in enumerate(years):
-            total_votes = if_votes[i] + lof_votes[i] + svm_votes[i]
-            # Normalized ensemble score (0 = definitely normal, 1 = definitely anomalous)
-            ensemble_score = (
-                (1 - (if_scores[i] + 0.5)) * 0.4 +  # IF contribution (40%)
-                (1 - (lof_scores[i] + 1.0)) * 0.3 +  # LOF contribution (30%)
-                (1 - (svm_scores[i] + 0.5)) * 0.3     # SVM contribution (30%)
-            )
-            ensemble_score = max(0.0, min(1.0, ensemble_score))
-            year_scores[year] = ensemble_score
+        models_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "models")
+        if not os.path.exists(os.path.join(models_dir, "scaler.joblib")):
+            return [], {}  # Pre-trained models not available
             
-            # Flag if at least 2 of 3 models agree it's anomalous
-            if total_votes >= 2:
-                voters = []
-                if if_votes[i]: voters.append("Isolation Forest")
-                if lof_votes[i]: voters.append("Local Outlier Factor")
-                if svm_votes[i]: voters.append("One-Class SVM")
-                
-                anomalies.append({
-                    "description": f"Ensemble ML Detection: Fiscal year {year} flagged as anomalous by {total_votes}/3 models ({', '.join(voters)}). Ensemble anomaly score: {ensemble_score:.2f}.",
-                    "severity": "High",
-                    "related_metrics": ["Multi-dimensional structural deviation"]
-                })
+        scaler = joblib.load(os.path.join(models_dir, "scaler.joblib"))
+        if_model = joblib.load(os.path.join(models_dir, "if_model.joblib"))
+        lof_model = joblib.load(os.path.join(models_dir, "lof_model.joblib"))
+        svm_model = joblib.load(os.path.join(models_dir, "svm_model.joblib"))
+        model_stats = joblib.load(os.path.join(models_dir, "model_stats.joblib"))
         
-        return anomalies, year_scores
+        feature_dict = compute_company_feature_vector(metrics_by_year)
+        df = pd.DataFrame([feature_dict]).fillna(0)
+        X_scaled = scaler.transform(df)
         
+        if_score_raw = -if_model.decision_function(X_scaled)[0]
+        lof_score_raw = -lof_model.decision_function(X_scaled)[0]
+        svm_score_raw = -svm_model.decision_function(X_scaled)[0]
+        
+        if_score_norm = (if_score_raw - model_stats['if_min']) / (model_stats['if_max'] - model_stats['if_min'] + 1e-9)
+        lof_score_norm = (lof_score_raw - model_stats['lof_min']) / (model_stats['lof_max'] - model_stats['lof_min'] + 1e-9)
+        svm_score_norm = (svm_score_raw - model_stats['svm_min']) / (model_stats['svm_max'] - model_stats['svm_min'] + 1e-9)
+        
+        if_vote = 1 if if_score_raw > model_stats['if_threshold'] else 0
+        lof_vote = 1 if lof_score_raw > model_stats['lof_threshold'] else 0
+        svm_vote = 1 if svm_score_raw > model_stats['svm_threshold'] else 0
+        
+        total_votes = if_vote + lof_vote + svm_vote
+        
+        anomalies = []
+        if total_votes >= 2:
+            voters = []
+            if if_vote: voters.append("Isolation Forest")
+            if lof_vote: voters.append("Local Outlier Factor")
+            if svm_vote: voters.append("One-Class SVM")
+            
+            anomalies.append({
+                "description": f"Ensemble ML Detection: Company flagged as anomalous by {total_votes}/3 population-trained models ({', '.join(voters)}). This indicates significant deviation from standard industry financial profiles.",
+                "severity": "High",
+                "related_metrics": ["Multi-dimensional structural deviation"]
+            })
+            
+        return anomalies, {}
     except Exception as e:
         print(f"[ML] Ensemble detection failed: {e}")
         return [], {}
@@ -651,58 +660,33 @@ def _run_ensemble_detection(metrics_by_year: Dict[str, Dict[str, float]]) -> Tup
 
 def _run_autoencoder(metrics_by_year: Dict[str, Dict[str, float]]) -> List[Dict[str, Any]]:
     """
-    Autoencoder-based Anomaly Detection:
-      - Trains a small neural network to reconstruct 'normal' financial profiles.
-      - Years with high reconstruction error are flagged as anomalous.
-      - Uses sklearn's MLPRegressor as a lightweight autoencoder (no PyTorch needed).
+    Autoencoder-based Anomaly Detection using pre-trained model.
     """
-    feature_df = _compute_advanced_features(metrics_by_year)
-    if len(feature_df) < 4:
-        return []
-    
-    df_imputed = feature_df.fillna(feature_df.mean(numeric_only=True)).fillna(0)
-    
     try:
-        scaler = MinMaxScaler()
-        scaled_data = scaler.fit_transform(df_imputed)
-        n_features = scaled_data.shape[1]
+        models_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "models")
+        if not os.path.exists(os.path.join(models_dir, "ae_scaler.joblib")):
+            return []
+            
+        ae_scaler = joblib.load(os.path.join(models_dir, "ae_scaler.joblib"))
+        autoencoder = joblib.load(os.path.join(models_dir, "autoencoder.joblib"))
+        model_stats = joblib.load(os.path.join(models_dir, "model_stats.joblib"))
         
-        # Bottleneck architecture: input -> compressed -> output
-        hidden_size = max(2, n_features // 3)
+        feature_dict = compute_company_feature_vector(metrics_by_year)
+        df = pd.DataFrame([feature_dict]).fillna(0)
+        X_scaled = ae_scaler.transform(df)
         
-        autoencoder = MLPRegressor(
-            hidden_layer_sizes=(hidden_size,),
-            activation='relu',
-            max_iter=500,
-            random_state=42,
-            tol=1e-5,
-            early_stopping=False
-        )
-        
-        # Train autoencoder to reconstruct its own input
-        autoencoder.fit(scaled_data, scaled_data)
-        
-        # Calculate reconstruction error per year
-        reconstructed = autoencoder.predict(scaled_data)
-        errors = np.mean((scaled_data - reconstructed) ** 2, axis=1)
-        
-        # Flag years where reconstruction error is > 2 standard deviations above mean
-        mean_error = np.mean(errors)
-        std_error = np.std(errors)
-        threshold = mean_error + 2 * std_error
+        reconstructed = autoencoder.predict(X_scaled)
+        error = np.mean((X_scaled - reconstructed) ** 2)
         
         anomalies = []
-        years = list(feature_df.index)
-        for i, year in enumerate(years):
-            if errors[i] > threshold and std_error > 0.001:  # Avoid flagging when all errors are near-zero
-                anomalies.append({
-                    "description": f"Autoencoder detected fiscal year {year} as anomalous (reconstruction error: {errors[i]:.4f}, threshold: {threshold:.4f}). The financial profile for this year cannot be reconstructed from the learned 'normal' patterns.",
-                    "severity": "High",
-                    "related_metrics": ["Deep Learning structural deviation"]
-                })
-        
+        if error > model_stats['ae_threshold']:
+            anomalies.append({
+                "description": f"Autoencoder Deep Learning Check: Company reconstruction error ({error:.4f}) exceeded the population threshold ({model_stats['ae_threshold']:.4f}). The 5-year financial trajectory cannot be reconstructed from 'normal' company patterns.",
+                "severity": "High",
+                "related_metrics": ["Deep Learning structural deviation"]
+            })
+            
         return anomalies
-        
     except Exception as e:
         print(f"[ML] Autoencoder failed: {e}")
         return []
